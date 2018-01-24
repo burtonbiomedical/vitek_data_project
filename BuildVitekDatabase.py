@@ -149,6 +149,7 @@ class BuildReportTree:
             return True
         else:
             return False
+        
 
 class BuildDatabase:
     """Using a supplied mongodb client, database name, and CD-ROM file pathway, this object attempts to populate the designated
@@ -172,12 +173,40 @@ class BuildDatabase:
                     if 'error' in report_tree.keys():
                         print('{}: {}'.format(filename, report_tree['error']))
                     else:
-                        try:
-                            insert_id = self.db.reports.insert_one(report_tree).inserted_id
-                            print('{} inserted with id {}'.format(filename, insert_id))
-                        except:
-                            print('Failed to save {}'.format(filename))           
-
+                       self.insert_report(report_tree, filename)
+                            
+    def insert_report(self, report_tree, filename):
+        """Attempt to save report tree structure as new document in report collection
+        params:
+        report_tree -- nested hash tables representing the report
+        filename -- string path of file currently being processed"""
+        
+        #try:
+        insert_id = self.db.reports.insert_one(report_tree).inserted_id
+        print('{} inserted with id {}'.format(filename, insert_id))
+        self.insert_org(report_tree, insert_id)
+        #except:
+            #print('Failed to save {}'.format(filename))
+    
+    def insert_org(self, report_tree, report_id):
+        """Check if organism exists in organism collection, if not add new organism, else add report ID to list
+        of report id's for this organism
+        params:
+        report_tree -- nested hash tables representing the report
+        report_id -- mongo id for report document"""
+        
+        org_name = report_tree['AstTestInfo']['SelectedOrg']['orgFullName']
+        if self.db['orgs'].find_one({org_name: {'$exists': True}}):
+            org_doc = self.db['orgs'].find_one({org_name: {'$exists': True}})
+            org_doc[org_name].append(report_id)
+            self.db.orgs.update_one({'_id': org_doc['_id']}, {'$set': org_doc}, upsert=False)
+            print("{} summary updated".format(org_name))
+        else:
+            new_org = {org_name:[report_id]}
+            insert_id = self.db.orgs.insert_one(new_org).inserted_id
+            print('Create new summary entry for organism {}, with id {}'.format(org_name, insert_id))
+            
+            
 def getopts(argv):
     """Collect command-line options in a dictionary
     params:
