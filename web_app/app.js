@@ -1,6 +1,7 @@
 //Bring in dependencies
 const express = require('express');
 const exphbs = require('express-handlebars');
+const path = require('path');
 const mongoose = require('mongoose');
 const bodyParser = require('body-parser');
 const methodOverride = require('method-override');
@@ -64,6 +65,9 @@ app.use(function(request, response, next){
   next();
 });
 
+//SET STATIC DIRECTORY PATH
+app.use(express.static(path.join(__dirname, 'public')));
+
 //SETTING ROUTES
 app.get('/', (request, response) => {
   const title = "Microbiology Data Portal"
@@ -71,6 +75,11 @@ app.get('/', (request, response) => {
     title: title
   });
 });
+
+app.get('/vitek', (request, response) => {
+  response.render('vitek');
+});
+
 
 //SET PORT
 //You set a port for your listen method
