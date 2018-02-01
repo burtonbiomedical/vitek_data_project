@@ -8,6 +8,7 @@ import re
 import PyPDF2 as pdfreader
 import pymongo
 import os
+from datetime import datetime
 
 class BuildReportTree:
     """Generate a tree of hash tables to represent the reports extracted from XML file"""
@@ -18,58 +19,100 @@ class BuildReportTree:
         params:
         path -- binary string"""
         #There may be multiple reports in an xml file i.e. multiple isolates
-        self.reports = []
+        self.lab_reports = {}
+
         with open(path, "r") as f:
             handler = f.read()
             soup = Soup(handler, 'lxml')
-            report_body = soup.findAll("report_body")
-            for content in report_body:
-                if str(content.contents).find("ReportData&gt") != -1:
-                    report_strings = str(content.contents).replace("\n", "").split("&gt;&lt;")
-                    report_array = list(map(lambda x: x.replace("/", ""), report_strings))
-                    self.reports.append(report_array)
+            lab_reports_soup = soup.find_all('lab_report')
+            for report in lab_reports_soup:
+                id_ = re.compile(r'<lab_report id="([0-9]+)">').search(str(report)).group(1)
+                report_array = str(report.find("source_xmlstring")).replace("\n", "").split("&gt;&lt;")
+                report_array = list(map(lambda x: x.replace("/", ""), report_array))
+                self.lab_reports[id_] = report_array
 
-    def drop_not_body(self, tag):
-        """Remove any elements that are not part of the report body
-        params:
-        tag -- element of report soup object"""
-
-        return str(tag).find("ReportData&gt") != -1
-
-    def build_tree(self):
+    def build_trees(self):
         """Using current object property report_array, generate a tree structure to represent the report"""
-        report_trees = []
-        for report in self.reports:
-            report_tree = dict()
-            headings = {'ReportData': 0,
-                'AstDetailedInfo': 0,
-                'AstTestInfo':0}
-            #Drop source_xmlstring
-            def not_sourcexmlstring(x):
-                return x.find("source_xmlstring") == -1
-            report = list(filter(not_sourcexmlstring, report))
-            #Find start index for each section
-            for i, row in enumerate(report):
-                if row in headings.keys():
-                    headings[row] = i
-            if not all(val == 0 for key, val in headings.items()):
-                sections = dict()
-                sections["ReportData"] = report[headings["ReportData"]:headings["AstDetailedInfo"]]
-                sections["AstDetailedInfo"] = report[headings["AstDetailedInfo"]: headings['AstTestInfo']]
-                sections["AstTestInfo"] = report[headings["AstTestInfo"]:len(report)]
-                for header, section in sections.items():
-                    report_tree = self.process_data(header, section, report_tree)
-                report_trees.append(report_tree)
-            else:
-                return [{"error":"Section index error, check report_array property for inconsistencies"}]
-        return report_trees
+        try:
+            document_tree = {}
+            lab_reports = []
+            for id_, report in self.lab_reports.items():
+                isolate_branch = dict()
+                headings = {'ReportData': 0,
+                    'AstDetailedInfo': 0,
+                    'AstTestInfo':0}
+                #Drop source_xmlstring
+                def not_sourcexmlstring(x):
+                    return x.find("source_xmlstring") == -1
+                report = list(filter(not_sourcexmlstring, report))
+                #Find start index for each section
+                for i, row in enumerate(report):
+                    if row in headings.keys():
+                        headings[row] = i
+                if not all(val == 0 for key, val in headings.items()):
+                    sections = dict()
+                    sections["ReportData"] = report[headings["ReportData"]:headings["AstDetailedInfo"]]
+                    sections["AstDetailedInfo"] = report[headings["AstDetailedInfo"]: headings['AstTestInfo']]
+                    sections["AstTestInfo"] = report[headings["AstTestInfo"]:len(report)]
+                    for header, section in sections.items():
+                        isolate_branch = self.init_document_tree(header, section, isolate_branch)
+                    lab_reports.append({
+                        'isolate_id': id_,
+                        'isolate_data': isolate_branch
+                    })
+                else:
+                    return {"error":"Section index error, check report_array property for inconsistencies"}
+            document_tree['lab_reports'] = lab_reports
+            try:
+                document_tree['organism_summary'] = self.init_org_summary_tree(lab_reports)
+            except:
+                return {"error":"Failed to build organism_summary branch"}
+            return document_tree
+        except:
+            return {"error":"Fatal error when building document tree"}
 
-    def process_data(self, header, section, report_tree):
+    def init_org_summary_tree(self, lab_reports):
+        """Build organism summary - unique organism and MIC data from from report
+        params:
+        lab_reports -- tree structure for laboratory reports"""
+
+        org_summary_array = []
+        org_summary_tree = []
+        iso_num = 0
+        for isolate_branch in lab_reports:
+            isolate_summary = {}
+            id_ = isolate_branch['isolate_id']
+            isolate_data = isolate_branch['isolate_data']
+            #Get organism name
+            org = isolate_data['AstTestInfo']['SelectedOrg']['orgFullName']
+            isolate_summary['organism_name'] = org
+            isolate_summary['mic_data'] = []
+            #Get drug data
+            drug_data = isolate_data['AstDetailedInfo']
+            for drug in drug_data:
+                if type(drug['details']['mic']) == str:
+                    drug_result = drug['details']['interpretation']
+                    key = 'interpretation'
+                else:
+                    drug_result = drug['details']['mic']   
+                    key = 'mic'
+                isolate_summary['mic_data'].append({'drug':drug['drug'], key: drug_result})
+            #If this organism is not unique in MIC values/organism species, do not add to tree
+            if isolate_summary not in org_summary_array:
+                org_summary_tree.append({
+                    'isolate_id': 'isolate_'+str(iso_num),
+                    'isolate_data': isolate_summary
+                })
+                iso_num += 1
+                org_summary_array.append(isolate_summary)
+        return org_summary_tree
+
+    def init_document_tree(self, header, section, document_tree):
         """Create branch and leaves for passed section, add too tree and return structure
         params:
         header -- section header, as string, to be used as branch key
         section -- array of strings of section elements
-        report_tree -- report tree structure"""
+        document_tree -- report tree structure"""
 
         section_data = dict()
         #remove any elements containing a single item
@@ -88,18 +131,23 @@ class BuildReportTree:
             section_data["phenotype_info"] = dict()
             for phenotype in phenotype_data:
                 section_data["phenotype_info"].update({phenotype["familyName"]: phenotype["phenotypeName"]})
-            report_tree[header] = section_data
-            return report_tree
-        #For all other sections, build dictionary using key value pairs according to string value
-        for row in section:
-            #If row is for Drug information, use drug name as key
-            if row.split(" ")[0] == "AstDrugResultInfo":
+            document_tree[header] = section_data
+            return document_tree
+        #If section is AstDetailedInfo, sort for Drug information
+        elif header == 'AstDetailedInfo':
+            document_tree[header] = []
+            for row in section:
                 drug_key, values = self.get_drug_data(" ".join(row.split(" ")[1:]))
-                section_data[drug_key] = values
-            else:
+                document_tree[header].append({
+                    'drug': drug_key,
+                    'details': values
+                })
+        #Report data save as just key value pairs
+        else:
+            for row in section:
                 section_data[row.split(" ")[0]] = self.create_dict(" ".join(row.split(" ")[1:]))
-            report_tree[header] = section_data
-        return report_tree
+            document_tree[header] = section_data
+        return document_tree
 
     def get_drug_data(self, drug_info):
         """Take string of drug information, create dictionary with key as drug name, and value as dictionary of attributes"""
@@ -149,18 +197,18 @@ class BuildReportTree:
             return True
         else:
             return False
-
-
+        
 class BuildDatabase:
     """Using a supplied mongodb client, database name, and CD-ROM file pathway, this object attempts to populate the designated
     mongo database with report objects obtained from XML files on the target CD-ROM"""
 
-    def __init__(self, mongoclient, dbname, dir_path):
+    def __init__(self, mongoclient, dbname, dir_path, error_path):
         """Initislise object and set global variables"""
 
         self.db = mongoclient[dbname]
-        #self.file_path = os.fsencode(dir_path)
         self.file_path = dir_path
+        self.error_path = error_path
+        self.errors = []
 
     def build(self):
         """Iterate over files in path specified, if they correspond to a report, add to database"""
@@ -170,51 +218,67 @@ class BuildDatabase:
             if 'reports_isolate' in filename:
                 xml_obj = BuildReportTree(str(self.file_path) + filename)
                 try:
-                    report_trees = xml_obj.build_tree()
-                    for report_tree in report_trees:
-                        if 'error' in report_tree.keys():
-                            print('{}: {}'.format(filename, report_tree['error']))
-                        else:
-                           self.insert_report(report_tree, filename)
+                    document_tree = xml_obj.build_trees()
+                    if 'error' in document_tree.keys():
+                         print('{}: {}'.format(filename, document_tree['error']))
+                         self.errors.append("{} ERROR: {} FILENAME: {}".format(str(datetime.now()), document_tree['error'], filename))
+                    else:
+                         self.insert_report(document_tree, filename)
+                    self.log_errors()
                 except:
-                    print("Fatal error on {}, failed to build report tree".format(filename))
+                    print("Fatal error on {}, failed to build document tree".format(filename))
+                    self.errors.append("{} FATAL ERROR, UNABLE TO BUILD DOC TREE. FILENAME: {}".format(str(datetime.now()), filename))
+                    self.log_errors()
 
-    def insert_report(self, report_tree, filename):
+
+    def insert_report(self, document_tree, filename):
         """Attempt to save report tree structure as new document in report collection
         params:
-        report_tree -- nested hash tables representing the report
+        document_tree -- nested hash tables representing the report
         filename -- string path of file currently being processed"""
 
         try:
-            insert_id = self.db.reports.insert_one(report_tree).inserted_id
+            insert_id = self.db.reports.insert_one(document_tree).inserted_id
             print('{} inserted with id {}'.format(filename, insert_id))
-            self.insert_org(report_tree, insert_id)
+            self.insert_org(document_tree, insert_id)
         except:
             print('Failed to save {}'.format(filename))
+            self.errors.append("{} RECORD NOT SAVED. FILENAME: {}".format(str(datetime.now()), filename))
 
-    def insert_org(self, report_tree, report_id):
+    def insert_org(self, document_tree, document_id):
         """Check if organism exists in organism collection, if not add new organism, else add report ID to list
         of report id's for this organism
         params:
-        report_tree -- nested hash tables representing the report
-        report_id -- mongo id for report document"""
+        document_tree -- nested hash tables representing the report
+        document_id -- mongo id for report document"""
+        org_summary = document_tree['organism_summary']
+        unique_orgs = set()
+        for isolate in org_summary:
+            unique_orgs.add(isolate['isolate_data']['organism_name'])
+        for org_name in unique_orgs:
+            if self.db['orgs'].find_one({org_name: {'$exists': True}}):
+                try:
+                    org_doc = self.db['orgs'].find_one({org_name: {'$exists': True}})
+                    org_doc[org_name].append(document_id)
+                    self.db.orgs.update_one({'_id': org_doc['_id']}, {'$set': org_doc}, upsert=False)
+                    print("{} summary updated".format(org_name))
+                except:
+                    print("Failed to update org summary: {} with report id: {}".format(org_name, document_id))
+                    self.errors.append("{} REPORT: {} NOT ADDED TO ORG SUMMARY FOR {}".format(str(datetime.now()), document_id, org_name))
+            else:
+                try:
+                    new_org = {org_name:[document_id]}
+                    insert_id = self.db.orgs.insert_one(new_org).inserted_id
+                    print('Create new summary entry for organism {}, with id {}'.format(org_name, insert_id))
+                except:
+                    print("Failed to insert new organism summary for: {}".format(org_name))
+                    self.errors.append("{} FAILED TO CREATE NEW ORG SUMMARY: {}".format(str(datetime.now()), orgname))
 
-        org_name = report_tree['AstTestInfo']['SelectedOrg']['orgFullName']
-        if self.db['orgs'].find_one({org_name: {'$exists': True}}):
-            try:
-                org_doc = self.db['orgs'].find_one({org_name: {'$exists': True}})
-                org_doc[org_name].append(report_id)
-                self.db.orgs.update_one({'_id': org_doc['_id']}, {'$set': org_doc}, upsert=False)
-                print("{} summary updated".format(org_name))
-            except:
-                print("Failed to update org summary: {} with report id: {}".format(org_name, report_id))
-        else:
-            try:
-                new_org = {org_name:[report_id]}
-                insert_id = self.db.orgs.insert_one(new_org).inserted_id
-                print('Create new summary entry for organism {}, with id {}'.format(org_name, insert_id))
-            except:
-                print("Failed to insert new organism summary for: {}".format(org_name))
+    def log_errors(self):
+        """Insert errors into error log"""
+        with open(self.error_path, 'w') as f:
+            for error in self.errors:
+                f.write(error+'\n')
 
 
 def getopts(argv):
@@ -241,5 +305,10 @@ if __name__ == '__main__':
     else:
         print("Please specify target directory e.g '-dir_path C:\data\reports'")
         exit()
+    if 'error_path' in myargs.keys():
+        error_path = myargs['error_path']
+    else:
+        print("Please specify target for error log e.g '-error_path C:\data\errors.txt'")
+        exit()
     client = pymongo.MongoClient()
-    BuildDatabase(client, dbname, dir_path).build()
+    BuildDatabase(client, dbname, dir_path, error_path).build()
