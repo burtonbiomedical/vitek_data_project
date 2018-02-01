@@ -11,7 +11,7 @@ import os
 
 class BuildReportTree:
     """Generate a tree of hash tables to represent the reports extracted from XML file"""
-    
+
     def __init__(self, path):
         """Instantiate BuildReportTree object using XML file path. Will generate report_array property, a list of string
         elements repesenting the list
@@ -33,9 +33,9 @@ class BuildReportTree:
         """Remove any elements that are not part of the report body
         params:
         tag -- element of report soup object"""
-        
+
         return str(tag).find("ReportData&gt") != -1
-    
+
     def build_tree(self):
         """Using current object property report_array, generate a tree structure to represent the report"""
         report_trees = []
@@ -61,16 +61,16 @@ class BuildReportTree:
                     report_tree = self.process_data(header, section, report_tree)
                 report_trees.append(report_tree)
             else:
-                return {"error":"Section index error, check report_array property for inconsistencies"}
+                return [{"error":"Section index error, check report_array property for inconsistencies"}]
         return report_trees
-    
+
     def process_data(self, header, section, report_tree):
         """Create branch and leaves for passed section, add too tree and return structure
         params:
         header -- section header, as string, to be used as branch key
         section -- array of strings of section elements
         report_tree -- report tree structure"""
-        
+
         section_data = dict()
         #remove any elements containing a single item
         section = list(filter(lambda x: len(x.split(" ")) > 1, section))
@@ -100,10 +100,10 @@ class BuildReportTree:
                 section_data[row.split(" ")[0]] = self.create_dict(" ".join(row.split(" ")[1:]))
             report_tree[header] = section_data
         return report_tree
-    
+
     def get_drug_data(self, drug_info):
         """Take string of drug information, create dictionary with key as drug name, and value as dictionary of attributes"""
-        
+
         drug_dict = self.create_dict(drug_info)
         drug_key = drug_dict["drugName"]
         values = {key: value for key, value in drug_dict.items() if key is not "drugName"}
@@ -118,20 +118,20 @@ class BuildReportTree:
             if not self.confidential_data(key):
                 element_dict[key] = self.format_val(value)
         return element_dict
-    
+
     def split_list(self, l, n):
         """Split list into list of lists with length n. List length must equal n to yield
         params:
         l -- list to split
         n -- disired number of elements per list"""
-        
+
         for i in range(0, len(l), n):
             if len(l[i:i+n]) == n:
                 yield l[i:i+n]
-                
+
     def format_val(self, string):
         """Check if value is interget or float"""
-        
+
         if len(string) == 0:
             return string
         if all(x.isdigit() for x in list(string)):
@@ -141,81 +141,91 @@ class BuildReportTree:
                 return float(string)
             except:
                 return string
-        
+
     def confidential_data(self, string):
         """If key is a patient identifier return true"""
-        
+
         if string.find('patient') != -1:
             return True
         else:
             return False
-        
+
 
 class BuildDatabase:
     """Using a supplied mongodb client, database name, and CD-ROM file pathway, this object attempts to populate the designated
     mongo database with report objects obtained from XML files on the target CD-ROM"""
-    
+
     def __init__(self, mongoclient, dbname, dir_path):
         """Initislise object and set global variables"""
-        
+
         self.db = mongoclient[dbname]
-        self.file_path = os.fsencode(dir_path)
-        
+        #self.file_path = os.fsencode(dir_path)
+        self.file_path = dir_path
+
     def build(self):
         """Iterate over files in path specified, if they correspond to a report, add to database"""
-        
+
         for file in os.listdir(self.file_path):
             filename = os.fsdecode(file)
             if 'reports_isolate' in filename:
-                xml_obj = BuildReportTree(filename)
-                report_trees = xml_obj.build_tree()
-                for report_tree in report_trees:
-                    if 'error' in report_tree.keys():
-                        print('{}: {}'.format(filename, report_tree['error']))
-                    else:
-                       self.insert_report(report_tree, filename)
-                            
+                xml_obj = BuildReportTree(str(self.file_path) + filename)
+                try:
+                    report_trees = xml_obj.build_tree()
+                    for report_tree in report_trees:
+                        if 'error' in report_tree.keys():
+                            print('{}: {}'.format(filename, report_tree['error']))
+                        else:
+                           self.insert_report(report_tree, filename)
+                except:
+                    print("Fatal error on {}, failed to build report tree".format(filename))
+
     def insert_report(self, report_tree, filename):
         """Attempt to save report tree structure as new document in report collection
         params:
         report_tree -- nested hash tables representing the report
         filename -- string path of file currently being processed"""
-        
-        #try:
-        insert_id = self.db.reports.insert_one(report_tree).inserted_id
-        print('{} inserted with id {}'.format(filename, insert_id))
-        self.insert_org(report_tree, insert_id)
-        #except:
-            #print('Failed to save {}'.format(filename))
-    
+
+        try:
+            insert_id = self.db.reports.insert_one(report_tree).inserted_id
+            print('{} inserted with id {}'.format(filename, insert_id))
+            self.insert_org(report_tree, insert_id)
+        except:
+            print('Failed to save {}'.format(filename))
+
     def insert_org(self, report_tree, report_id):
         """Check if organism exists in organism collection, if not add new organism, else add report ID to list
         of report id's for this organism
         params:
         report_tree -- nested hash tables representing the report
         report_id -- mongo id for report document"""
-        
+
         org_name = report_tree['AstTestInfo']['SelectedOrg']['orgFullName']
         if self.db['orgs'].find_one({org_name: {'$exists': True}}):
-            org_doc = self.db['orgs'].find_one({org_name: {'$exists': True}})
-            org_doc[org_name].append(report_id)
-            self.db.orgs.update_one({'_id': org_doc['_id']}, {'$set': org_doc}, upsert=False)
-            print("{} summary updated".format(org_name))
+            try:
+                org_doc = self.db['orgs'].find_one({org_name: {'$exists': True}})
+                org_doc[org_name].append(report_id)
+                self.db.orgs.update_one({'_id': org_doc['_id']}, {'$set': org_doc}, upsert=False)
+                print("{} summary updated".format(org_name))
+            except:
+                print("Failed to update org summary: {} with report id: {}".format(org_name, report_id))
         else:
-            new_org = {org_name:[report_id]}
-            insert_id = self.db.orgs.insert_one(new_org).inserted_id
-            print('Create new summary entry for organism {}, with id {}'.format(org_name, insert_id))
-            
-            
+            try:
+                new_org = {org_name:[report_id]}
+                insert_id = self.db.orgs.insert_one(new_org).inserted_id
+                print('Create new summary entry for organism {}, with id {}'.format(org_name, insert_id))
+            except:
+                print("Failed to insert new organism summary for: {}".format(org_name))
+
+
 def getopts(argv):
     """Collect command-line options in a dictionary
     params:
     argv: list of command line arguments"""
-    
-    opts = {} 
-    while argv:  
+
+    opts = {}
+    while argv:
         if argv[0][0] == '-':
-            opts[argv[0][1:]] = argv[1] 
+            opts[argv[0][1:]] = argv[1]
         argv = argv[1:]
     return opts
 
