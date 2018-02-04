@@ -67,7 +67,7 @@ class BuildReportTree:
                             isolate_branch = self.init_document_tree(header, section, isolate_branch)
                         #Check if organism name exists, if not exclude isolate
                         if len(isolate_branch['AstTestInfo']['SelectedOrg']['orgFullName']) == 0:
-                            lab_reports.append({"error": "Report missing organism ID"})
+                            lab_reports.append({"error": "Isolate {} report missing organism ID, omitted from database".format(id_)})
                         else:
                             lab_reports.append({
                                 'isolate_id': id_,
@@ -116,7 +116,7 @@ class BuildReportTree:
                             drug_result = drug['details']['interpretation']
                             key = 'interpretation'
                         else:
-                            drug_result = drug['details']['mic']   
+                            drug_result = drug['details']['mic']
                             key = 'mic'
                         isolate_summary['mic_data'].append({'drug':drug['drug'], key: drug_result})
                     #If this organism is not unique in MIC values/organism species, do not add to tree
@@ -219,7 +219,7 @@ class BuildReportTree:
             return True
         else:
             return False
-        
+
 class BuildDatabase:
     """Using a supplied mongodb client, database name, and CD-ROM file pathway, this object attempts to populate the designated
     mongo database with report objects obtained from XML files on the target CD-ROM"""
@@ -242,7 +242,7 @@ class BuildDatabase:
                 try:
                     document_tree = xml_obj.build_trees()
                     #Check for errors, only remove isolate branches that have errors and log errors
-                    document_tree = self.check_errors(document_tree)
+                    document_tree = self.check_errors(document_tree, filename)
                     if document_tree:
                         self.insert_report(document_tree, filename)
                     self.log_errors()
@@ -250,21 +250,20 @@ class BuildDatabase:
                     print("Fatal error on {}, failed to build document tree".format(filename))
                     self.errors.append("{} FATAL ERROR, UNABLE TO BUILD DOC TREE. FILENAME: {}".format(str(datetime.now()), filename))
                     self.log_errors()
-    
-    def check_errors(self, document_tree):
+
+    def check_errors(self, document_tree, filename):
         """Check for errors in document tree and process accordingly
         params:
         document_tree -- nested hash tables representing the report"""
         for i, report in enumerate(document_tree['lab_reports']):
             if 'error' in report.keys():
-                print('{}: {}'.format(self.file_path, report['error']))
-                errors.append("{} ERROR: {} FILENAME: {}".format(str(datetime.now()), report['error'], self.file_path))
+                self.errors.append("{} ERROR: {} FILENAME: {}".format(str(datetime.now()), report['error'], self.file_path + filename))
                 del document_tree['lab_reports'][i]
                 if len(document_tree['lab_reports']) > 0:
-                    document_tree = check_errors(document_tree)
+                    document_tree = self.check_errors(document_tree, filename)
                     return document_tree
         return document_tree
-            
+
 
 
     def insert_report(self, document_tree, filename):
