@@ -19,49 +19,69 @@ class BuildReportTree:
         params:
         path -- binary string"""
         #There may be multiple reports in an xml file i.e. multiple isolates
-        self.lab_reports = {}
+        self.lab_reports = []
 
         with open(path, "r") as f:
             handler = f.read()
             soup = Soup(handler, 'lxml')
             lab_reports_soup = soup.find_all('lab_report')
             for report in lab_reports_soup:
+                report_tree = {}
                 id_ = re.compile(r'<lab_report id="([0-9]+)">').search(str(report)).group(1)
                 report_array = str(report.find("source_xmlstring")).replace("\n", "").split("&gt;&lt;")
                 report_array = list(map(lambda x: x.replace("/", ""), report_array))
-                self.lab_reports[id_] = report_array
+                def is_ast_report(row):
+                    return row.find('IdTestInfo') == -1
+                report_tree['ast_report'] = all(list(map(is_ast_report, report_array)))
+                report_tree['report_id'] = id_
+                report_tree['report_data'] = report_array
+                self.lab_reports.append(report_tree)
 
     def build_trees(self):
         """Using current object property report_array, generate a tree structure to represent the report"""
         try:
             document_tree = {}
             lab_reports = []
-            for id_, report in self.lab_reports.items():
-                isolate_branch = dict()
-                headings = {'ReportData': 0,
-                    'AstDetailedInfo': 0,
-                    'AstTestInfo':0}
-                #Drop source_xmlstring
-                def not_sourcexmlstring(x):
-                    return x.find("source_xmlstring") == -1
-                report = list(filter(not_sourcexmlstring, report))
-                #Find start index for each section
-                for i, row in enumerate(report):
-                    if row in headings.keys():
-                        headings[row] = i
-                if not all(val == 0 for key, val in headings.items()):
-                    sections = dict()
-                    sections["ReportData"] = report[headings["ReportData"]:headings["AstDetailedInfo"]]
-                    sections["AstDetailedInfo"] = report[headings["AstDetailedInfo"]: headings['AstTestInfo']]
-                    sections["AstTestInfo"] = report[headings["AstTestInfo"]:len(report)]
-                    for header, section in sections.items():
-                        isolate_branch = self.init_document_tree(header, section, isolate_branch)
-                    lab_reports.append({
-                        'isolate_id': id_,
-                        'isolate_data': isolate_branch
-                    })
+            for report in self.lab_reports:
+                if report['ast_report']:
+                    isolate_branch = dict()
+                    isolate_data = report['report_data']
+                    id_ = report['report_id']
+                    headings = {'ReportData': 0,
+                        'AstDetailedInfo': 0,
+                        'AstTestInfo':0}
+                    #Drop source_xmlstring
+                    def not_sourcexmlstring(x):
+                        return x.find("source_xmlstring") == -1
+                    isolate_data = list(filter(not_sourcexmlstring, isolate_data))
+                    #Find start index for each section
+                    for i, row in enumerate(isolate_data):
+                        if row in headings.keys():
+                            headings[row] = i
+                    if not all(val == 0 for key, val in headings.items()):
+                        sections = dict()
+                        sections["ReportData"] = isolate_data[headings["ReportData"]:headings["AstDetailedInfo"]]
+                        sections["AstDetailedInfo"] = isolate_data[headings["AstDetailedInfo"]: headings['AstTestInfo']]
+                        sections["AstTestInfo"] = isolate_data[headings["AstTestInfo"]:len(isolate_data)]
+                        for header, section in sections.items():
+                            isolate_branch = self.init_document_tree(header, section, isolate_branch)
+                        #Check if organism name exists, if not exclude isolate
+                        if len(isolate_branch['AstTestInfo']['SelectedOrg']['orgFullName']) == 0:
+                            lab_reports.append({"error": "Report missing organism ID"})
+                        else:
+                            lab_reports.append({
+                                'isolate_id': id_,
+                                'isolate_data': isolate_branch,
+                                'isolate_report_type': 'ast'
+                            })
+                    else:
+                        return {"error":"Section index error, check report_array property for inconsistencies"}
                 else:
-                    return {"error":"Section index error, check report_array property for inconsistencies"}
+                    lab_reports.append({
+                        'isolate_id': report['report_id'],
+                        'isolate_data': report['report_data'],
+                        'isolate_report_type': 'id'
+                    })
             document_tree['lab_reports'] = lab_reports
             try:
                 document_tree['organism_summary'] = self.init_org_summary_tree(lab_reports)
@@ -80,31 +100,33 @@ class BuildReportTree:
         org_summary_tree = []
         iso_num = 0
         for isolate_branch in lab_reports:
-            isolate_summary = {}
-            id_ = isolate_branch['isolate_id']
-            isolate_data = isolate_branch['isolate_data']
-            #Get organism name
-            org = isolate_data['AstTestInfo']['SelectedOrg']['orgFullName']
-            isolate_summary['organism_name'] = org
-            isolate_summary['mic_data'] = []
-            #Get drug data
-            drug_data = isolate_data['AstDetailedInfo']
-            for drug in drug_data:
-                if type(drug['details']['mic']) == str:
-                    drug_result = drug['details']['interpretation']
-                    key = 'interpretation'
-                else:
-                    drug_result = drug['details']['mic']   
-                    key = 'mic'
-                isolate_summary['mic_data'].append({'drug':drug['drug'], key: drug_result})
-            #If this organism is not unique in MIC values/organism species, do not add to tree
-            if isolate_summary not in org_summary_array:
-                org_summary_tree.append({
-                    'isolate_id': 'isolate_'+str(iso_num),
-                    'isolate_data': isolate_summary
-                })
-                iso_num += 1
-                org_summary_array.append(isolate_summary)
+            if 'error' not in isolate_branch.keys():
+                if isolate_branch['isolate_report_type'] != 'id':
+                    isolate_summary = {}
+                    id_ = isolate_branch['isolate_id']
+                    isolate_data = isolate_branch['isolate_data']
+                    #Get organism name
+                    org = isolate_data['AstTestInfo']['SelectedOrg']['orgFullName']
+                    isolate_summary['organism_name'] = org
+                    isolate_summary['mic_data'] = []
+                    #Get drug data
+                    drug_data = isolate_data['AstDetailedInfo']
+                    for drug in drug_data:
+                        if type(drug['details']['mic']) == str:
+                            drug_result = drug['details']['interpretation']
+                            key = 'interpretation'
+                        else:
+                            drug_result = drug['details']['mic']   
+                            key = 'mic'
+                        isolate_summary['mic_data'].append({'drug':drug['drug'], key: drug_result})
+                    #If this organism is not unique in MIC values/organism species, do not add to tree
+                    if isolate_summary not in org_summary_array:
+                        org_summary_tree.append({
+                            'isolate_id': 'isolate_'+str(iso_num),
+                            'isolate_data': isolate_summary
+                        })
+                        iso_num += 1
+                        org_summary_array.append(isolate_summary)
         return org_summary_tree
 
     def init_document_tree(self, header, section, document_tree):
@@ -219,16 +241,30 @@ class BuildDatabase:
                 xml_obj = BuildReportTree(str(self.file_path) + filename)
                 try:
                     document_tree = xml_obj.build_trees()
-                    if 'error' in document_tree.keys():
-                         print('{}: {}'.format(filename, document_tree['error']))
-                         self.errors.append("{} ERROR: {} FILENAME: {}".format(str(datetime.now()), document_tree['error'], filename))
-                    else:
-                         self.insert_report(document_tree, filename)
+                    #Check for errors, only remove isolate branches that have errors and log errors
+                    document_tree = self.check_errors(document_tree)
+                    if document_tree:
+                        self.insert_report(document_tree, filename)
                     self.log_errors()
                 except:
                     print("Fatal error on {}, failed to build document tree".format(filename))
                     self.errors.append("{} FATAL ERROR, UNABLE TO BUILD DOC TREE. FILENAME: {}".format(str(datetime.now()), filename))
                     self.log_errors()
+    
+    def check_errors(self, document_tree):
+        """Check for errors in document tree and process accordingly
+        params:
+        document_tree -- nested hash tables representing the report"""
+        for i, report in enumerate(document_tree['lab_reports']):
+            if 'error' in report.keys():
+                print('{}: {}'.format(self.file_path, report['error']))
+                errors.append("{} ERROR: {} FILENAME: {}".format(str(datetime.now()), report['error'], self.file_path))
+                del document_tree['lab_reports'][i]
+                if len(document_tree['lab_reports']) > 0:
+                    document_tree = check_errors(document_tree)
+                    return document_tree
+        return document_tree
+            
 
 
     def insert_report(self, document_tree, filename):
@@ -279,7 +315,6 @@ class BuildDatabase:
         with open(self.error_path, 'w') as f:
             for error in self.errors:
                 f.write(error+'\n')
-
 
 def getopts(argv):
     """Collect command-line options in a dictionary
