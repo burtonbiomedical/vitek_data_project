@@ -28,6 +28,7 @@ class BuildReportTree:
             for report in lab_reports_soup:
                 report_tree = {}
                 id_ = re.compile(r'<lab_report id="([0-9]+)">').search(str(report)).group(1)
+                report_date = re.compile(r'<report_date>(\d{4}-\d{2}-\d{2})').search(str(report)).group(1)
                 report_array = str(report.find("source_xmlstring")).replace("\n", "").split("&gt;&lt;")
                 report_array = list(map(lambda x: x.replace("/", ""), report_array))
                 def is_ast_report(row):
@@ -35,6 +36,7 @@ class BuildReportTree:
                 report_tree['ast_report'] = all(list(map(is_ast_report, report_array)))
                 report_tree['report_id'] = id_
                 report_tree['report_data'] = report_array
+                report_tree['report_date'] = datetime.strptime(report_date, "%Y-%m-%d")
                 self.lab_reports.append(report_tree)
 
     def build_trees(self):
@@ -47,6 +49,7 @@ class BuildReportTree:
                     isolate_branch = dict()
                     isolate_data = report['report_data']
                     id_ = report['report_id']
+                    isolate_date = report['report_date']
                     headings = {'ReportData': 0,
                         'AstDetailedInfo': 0,
                         'AstTestInfo':0}
@@ -67,12 +70,13 @@ class BuildReportTree:
                             isolate_branch = self.init_document_tree(header, section, isolate_branch)
                         #Check if organism name exists, if not exclude isolate
                         if len(isolate_branch['AstTestInfo']['SelectedOrg']['orgFullName']) == 0:
-                            lab_reports.append({"error": "Isolate {} report missing organism ID, omitted from database".format(id_)})
+                            lab_reports.append({"error": "Report missing organism ID"})
                         else:
                             lab_reports.append({
                                 'isolate_id': id_,
                                 'isolate_data': isolate_branch,
-                                'isolate_report_type': 'ast'
+                                'isolate_report_type': 'ast',
+                                'isolate_date': isolate_date
                             })
                     else:
                         return {"error":"Section index error, check report_array property for inconsistencies"}
@@ -80,7 +84,8 @@ class BuildReportTree:
                     lab_reports.append({
                         'isolate_id': report['report_id'],
                         'isolate_data': report['report_data'],
-                        'isolate_report_type': 'id'
+                        'isolate_report_type': 'id',
+                        'isolate_date': report['report_date']
                     })
             document_tree['lab_reports'] = lab_reports
             try:
@@ -123,7 +128,8 @@ class BuildReportTree:
                     if isolate_summary not in org_summary_array:
                         org_summary_tree.append({
                             'isolate_id': 'isolate_'+str(iso_num),
-                            'isolate_data': isolate_summary
+                            'isolate_data': isolate_summary,
+                            'isolate_date': isolate_branch['isolate_date']
                         })
                         iso_num += 1
                         org_summary_array.append(isolate_summary)
@@ -257,7 +263,8 @@ class BuildDatabase:
         document_tree -- nested hash tables representing the report"""
         for i, report in enumerate(document_tree['lab_reports']):
             if 'error' in report.keys():
-                self.errors.append("{} ERROR: {} FILENAME: {}".format(str(datetime.now()), report['error'], self.file_path + filename))
+                print('{}: {}'.format(str(self.file_path)+filename, report['error']))
+                self.errors.append("{} ERROR: {} FILENAME: {}".format(str(datetime.now()), report['error'], self.file_path))
                 del document_tree['lab_reports'][i]
                 if len(document_tree['lab_reports']) > 0:
                     document_tree = self.check_errors(document_tree, filename)
