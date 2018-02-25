@@ -2,4 +2,5 @@
 *.xml
 nov_16_2016
 Vitek_Data
+**/testing
 testing
